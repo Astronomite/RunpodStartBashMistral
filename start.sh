@@ -12,7 +12,7 @@ ollama serve &
 sleep 10
 
 echo "[INFO] Pulling Mistral (Large 2.1)..."
-ollama pull mistral
+ollama pull mistral-large
 
 pip install requests
 
