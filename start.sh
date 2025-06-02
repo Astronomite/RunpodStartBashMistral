@@ -3,9 +3,6 @@
 # Fail fast
 set -e
 
-echo "[INFO] Updating system and installing dependencies..."
-apt-get update && apt-get install -y curl
-
 echo "[INFO] Installing Ollama..."
 curl -fsSL https://ollama.com/install.sh | sh
 
