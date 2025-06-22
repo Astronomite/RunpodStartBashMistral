@@ -86,75 +86,116 @@ fi
 mkdir -p /workspace/models/mistral-large-2411
 
 # 5. DOWNLOAD MISTRAL-LARGE-2411 Q6_K QUANTIZED MODEL
-echo "[INFO] Downloading Mistral-Large-2411 Q6_K quantized model..."
+echo "[INFO] Checking available disk space..."
+df -h /workspace
 
-# First, try to download using huggingface-cli (more reliable for large files)
-if command -v huggingface-cli &> /dev/null; then
-    echo "[INFO] Using huggingface-cli to download the model..."
+echo "[INFO] Downloading Mistral-Large-2411 Q6_K quantized model (~90GB)..."
+
+# Function to download with retry and resume
+download_with_retry() {
+    local repo_id="$1"
+    local pattern="$2"
+    local local_dir="$3"
+    local max_retries=5
+    local retry_count=0
     
-    # Set the token if available
-    if [ -n "$HUGGINGFACE_TOKEN" ]; then
-        huggingface-cli login --token "$HUGGINGFACE_TOKEN"
-    fi
-    
-    # Download the Q6_K model (it's split into multiple files)
-    echo "[INFO] Downloading Q6_K quantized model files..."
-    huggingface-cli download bartowski/Mistral-Large-Instruct-2411-GGUF \
-        --include "Mistral-Large-Instruct-2411-Q6_K/*" \
-        --local-dir /workspace/models/mistral-large-2411 \
-        --local-dir-use-symlinks False
-    
-    # Check if download was successful
-    if [ -d "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K" ]; then
-        echo "[INFO] ✅ Q6_K model downloaded successfully"
-        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K"
-    else
-        echo "[WARN] Q6_K download failed, trying Q4_K_M as fallback..."
-        huggingface-cli download bartowski/Mistral-Large-Instruct-2411-GGUF \
-            --include "Mistral-Large-Instruct-2411-Q4_K_M/*" \
-            --local-dir /workspace/models/mistral-large-2411 \
-            --local-dir-use-symlinks False
-        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M"
-    fi
-else
-    # Fallback to Python download
-    echo "[INFO] Using Python to download the model..."
-    python3 - <<EOF
-from huggingface_hub import snapshot_download
+    while [ $retry_count -lt $max_retries ]; do
+        echo "[INFO] Q6_K download attempt $((retry_count + 1))/$max_retries"
+        
+        if command -v huggingface-cli &> /dev/null; then
+            # Set the token if available
+            if [ -n "$HUGGINGFACE_TOKEN" ]; then
+                huggingface-cli login --token "$HUGGINGFACE_TOKEN"
+            fi
+            
+            # Use wget method for more reliable large file downloads
+            echo "[INFO] Using direct wget download for better reliability..."
+            mkdir -p "$local_dir/Mistral-Large-Instruct-2411-Q6_K"
+            cd "$local_dir/Mistral-Large-Instruct-2411-Q6_K"
+            
+            # Download each file separately with resume capability
+            local base_url="https://huggingface.co/bartowski/Mistral-Large-Instruct-2411-GGUF/resolve/main/Mistral-Large-Instruct-2411-Q6_K"
+            local auth_header=""
+            if [ -n "$HUGGINGFACE_TOKEN" ]; then
+                auth_header="--header=\"Authorization: Bearer $HUGGINGFACE_TOKEN\""
+            fi
+            
+            wget -c -t 5 -T 60 --progress=bar:force $auth_header "$base_url/Mistral-Large-Instruct-2411-Q6_K-00001-of-00003.gguf" &
+            wget -c -t 5 -T 60 --progress=bar:force $auth_header "$base_url/Mistral-Large-Instruct-2411-Q6_K-00002-of-00003.gguf" &
+            wget -c -t 5 -T 60 --progress=bar:force $auth_header "$base_url/Mistral-Large-Instruct-2411-Q6_K-00003-of-00003.gguf" &
+            
+            # Wait for all downloads to complete
+            wait
+            
+            # Check if all files downloaded successfully
+            if [ -f "Mistral-Large-Instruct-2411-Q6_K-00001-of-00003.gguf" ] && \
+               [ -f "Mistral-Large-Instruct-2411-Q6_K-00002-of-00003.gguf" ] && \
+               [ -f "Mistral-Large-Instruct-2411-Q6_K-00003-of-00003.gguf" ]; then
+                echo "[INFO] All Q6_K files downloaded successfully"
+                return 0
+            else
+                echo "[WARN] Some files missing, retrying..."
+            fi
+        else
+            # Python fallback with custom timeout and retry logic
+            python3 - <<EOF
+from huggingface_hub import hf_hub_download
 import os
+import time
 
-# Download the Q6_K quantized model
 token = os.environ.get('HUGGINGFACE_TOKEN', None)
+files = [
+    "Mistral-Large-Instruct-2411-Q6_K/Mistral-Large-Instruct-2411-Q6_K-00001-of-00003.gguf",
+    "Mistral-Large-Instruct-2411-Q6_K/Mistral-Large-Instruct-2411-Q6_K-00002-of-00003.gguf", 
+    "Mistral-Large-Instruct-2411-Q6_K/Mistral-Large-Instruct-2411-Q6_K-00003-of-00003.gguf"
+]
 
 try:
-    model_path = snapshot_download(
-        repo_id="bartowski/Mistral-Large-Instruct-2411-GGUF",
-        allow_patterns=["Mistral-Large-Instruct-2411-Q6_K/*"],
-        local_dir="/workspace/models/mistral-large-2411",
-        token=token,
-        local_dir_use_symlinks=False
-    )
-    print(f"Q6_K model downloaded to: {model_path}")
+    for filename in files:
+        print(f"Downloading {filename}...")
+        hf_hub_download(
+            repo_id="$repo_id",
+            filename=filename,
+            local_dir="$local_dir",
+            token=token,
+            local_dir_use_symlinks=False,
+            resume_download=True
+        )
+        time.sleep(1)  # Brief pause between files
+    print("All files downloaded successfully")
 except Exception as e:
-    print(f"Q6_K download failed: {e}")
-    print("Trying Q4_K_M as fallback...")
-    model_path = snapshot_download(
-        repo_id="bartowski/Mistral-Large-Instruct-2411-GGUF",
-        allow_patterns=["Mistral-Large-Instruct-2411-Q4_K_M/*"],
-        local_dir="/workspace/models/mistral-large-2411",
-        token=token,
-        local_dir_use_symlinks=False
-    )
-    print(f"Q4_K_M model downloaded to: {model_path}")
+    print(f"Download failed: {e}")
+    exit(1)
 EOF
+        fi
+        
+        # Check if download succeeded
+        if [ $? -eq 0 ]; then
+            echo "[INFO] Q6_K download completed successfully"
+            return 0
+        else
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+                echo "[WARN] Download failed, waiting 60 seconds before retry..."
+                sleep 60
+            fi
+        fi
+    done
     
-    # Determine which model was downloaded
-    if [ -d "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K" ]; then
-        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K"
-    else
-        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M"
-    fi
+    echo "[ERROR] Q6_K download failed after $max_retries attempts"
+    return 1
+}
+
+# Download Q6_K model with retry logic
+if download_with_retry "bartowski/Mistral-Large-Instruct-2411-GGUF" "Mistral-Large-Instruct-2411-Q6_K/*" "/workspace/models/mistral-large-2411"; then
+    MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K"
+    echo "[INFO] ✅ Q6_K model downloaded successfully"
+else
+    echo "[ERROR] Failed to download Q6_K model after all retry attempts!"
+    echo "[INFO] You may want to try downloading manually or check your network connection"
+    exit 1
 fi
+
 
 # 6. INSTALL LLAMA.CPP
 echo "[INFO] Installing llama.cpp for GGUF model serving..."
