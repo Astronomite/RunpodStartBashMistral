@@ -87,21 +87,74 @@ mkdir -p /workspace/models/mistral-large-2411
 
 # 5. DOWNLOAD MISTRAL-LARGE-2411 Q6_K QUANTIZED MODEL
 echo "[INFO] Downloading Mistral-Large-2411 Q6_K quantized model..."
-python3 - <<EOF
-from huggingface_hub import hf_hub_download
+
+# First, try to download using huggingface-cli (more reliable for large files)
+if command -v huggingface-cli &> /dev/null; then
+    echo "[INFO] Using huggingface-cli to download the model..."
+    
+    # Set the token if available
+    if [ -n "$HUGGINGFACE_TOKEN" ]; then
+        huggingface-cli login --token "$HUGGINGFACE_TOKEN"
+    fi
+    
+    # Download the Q6_K model (it's split into multiple files)
+    echo "[INFO] Downloading Q6_K quantized model files..."
+    huggingface-cli download bartowski/Mistral-Large-Instruct-2411-GGUF \
+        --include "Mistral-Large-Instruct-2411-Q6_K/*" \
+        --local-dir /workspace/models/mistral-large-2411 \
+        --local-dir-use-symlinks False
+    
+    # Check if download was successful
+    if [ -d "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K" ]; then
+        echo "[INFO] ✅ Q6_K model downloaded successfully"
+        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K"
+    else
+        echo "[WARN] Q6_K download failed, trying Q4_K_M as fallback..."
+        huggingface-cli download bartowski/Mistral-Large-Instruct-2411-GGUF \
+            --include "Mistral-Large-Instruct-2411-Q4_K_M/*" \
+            --local-dir /workspace/models/mistral-large-2411 \
+            --local-dir-use-symlinks False
+        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M"
+    fi
+else
+    # Fallback to Python download
+    echo "[INFO] Using Python to download the model..."
+    python3 - <<EOF
+from huggingface_hub import snapshot_download
 import os
 
 # Download the Q6_K quantized model
 token = os.environ.get('HUGGINGFACE_TOKEN', None)
-model_file = hf_hub_download(
-    repo_id="bartowski/Mistral-Large-Instruct-2411-GGUF",
-    filename="Mistral-Large-Instruct-2411-Q6_K.gguf",
-    local_dir="/workspace/models/mistral-large-2411",
-    token=token  # Will be None if using stored credentials
-)
 
-print(f"Model downloaded to: {model_file}")
+try:
+    model_path = snapshot_download(
+        repo_id="bartowski/Mistral-Large-Instruct-2411-GGUF",
+        allow_patterns=["Mistral-Large-Instruct-2411-Q6_K/*"],
+        local_dir="/workspace/models/mistral-large-2411",
+        token=token,
+        local_dir_use_symlinks=False
+    )
+    print(f"Q6_K model downloaded to: {model_path}")
+except Exception as e:
+    print(f"Q6_K download failed: {e}")
+    print("Trying Q4_K_M as fallback...")
+    model_path = snapshot_download(
+        repo_id="bartowski/Mistral-Large-Instruct-2411-GGUF",
+        allow_patterns=["Mistral-Large-Instruct-2411-Q4_K_M/*"],
+        local_dir="/workspace/models/mistral-large-2411",
+        token=token,
+        local_dir_use_symlinks=False
+    )
+    print(f"Q4_K_M model downloaded to: {model_path}")
 EOF
+    
+    # Determine which model was downloaded
+    if [ -d "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K" ]; then
+        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K"
+    else
+        MODEL_PATH="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M"
+    fi
+fi
 
 # 6. INSTALL LLAMA.CPP
 echo "[INFO] Installing llama.cpp for GGUF model serving..."
@@ -119,17 +172,40 @@ else
 fi
 
 # 7. START LLAMA.CPP SERVER WITH PARALLELISM
-echo "[INFO] Starting llama.cpp server with Mistral Large 2411 Q6_K..."
+echo "[INFO] Starting llama.cpp server with Mistral Large 2411..."
 cd /workspace/llama.cpp
 
 # Calculate optimal thread counts
 TOTAL_THREADS=$(nproc)
 GPU_LAYERS=99  # Use all GPU layers if GPU available
 
+# Find the actual model file (it might be split)
+if [ -f "$MODEL_PATH"/*.gguf ]; then
+    # Single file model
+    MODEL_FILE=$(find "$MODEL_PATH" -name "*.gguf" -type f | head -1)
+    echo "[INFO] Using single model file: $MODEL_FILE"
+else
+    # Check if it's the original model directory structure
+    if [ -f "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K.gguf" ]; then
+        MODEL_FILE="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K.gguf"
+    elif [ -f "/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M.gguf" ]; then
+        MODEL_FILE="/workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q4_K_M.gguf"
+    else
+        # Look for any .gguf file
+        MODEL_FILE=$(find /workspace/models/mistral-large-2411 -name "*.gguf" -type f | head -1)
+    fi
+    echo "[INFO] Using model file: $MODEL_FILE"
+fi
+
+if [ -z "$MODEL_FILE" ] || [ ! -f "$MODEL_FILE" ]; then
+    echo "[ERROR] No model file found! Check the download."
+    exit 1
+fi
+
 if [ "$GPU_AVAILABLE" = true ]; then
     echo "[INFO] Starting with GPU acceleration and auto-configured parallelism..."
     ./server \
-        --model /workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K.gguf \
+        --model "$MODEL_FILE" \
         --host 0.0.0.0 \
         --port 8000 \
         --ctx-size 32768 \
@@ -146,7 +222,7 @@ if [ "$GPU_AVAILABLE" = true ]; then
 else
     echo "[INFO] Starting with CPU parallelism only..."
     ./server \
-        --model /workspace/models/mistral-large-2411/Mistral-Large-Instruct-2411-Q6_K.gguf \
+        --model "$MODEL_FILE" \
         --host 0.0.0.0 \
         --port 8000 \
         --ctx-size 32768 \
@@ -168,6 +244,7 @@ if [ -f /workspace/rclone_config/rclone.conf ]; then
 fi
 
 echo "[✅] Setup complete. llama.cpp server available at http://localhost:8000"
+echo "[INFO] Model loaded: $MODEL_FILE"
 echo "[INFO] You can now query the model using HTTP requests to the server"
 echo "[INFO] Server logs will appear below..."
 
