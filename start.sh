@@ -1,88 +1,58 @@
 #!/bin/bash
 
-# Fail fast
 set -e
 
-# Create rclone config directory if needed
+echo "[INFO] Starting full setup for Mistral-Large-2407 with vLLM..."
+
+# 1. RCLONE SETUP
 mkdir -p /workspace/rclone_config
-
-# If config doesn't exist, prompt user to create or restore
 if [ ! -f /workspace/rclone_config/rclone.conf ]; then
-    echo "[WARN] No rclone config found at /workspace/rclone_config/rclone.conf"
-    echo "Run 'rclone config --config /workspace/rclone_config/rclone.conf' to set it up."
-fi
-
-# Point rclone to the persistent config
-export RCLONE_CONFIG=/workspace/rclone_config/rclone.conf
-
-# Define Ollama model storage directory and binary cache
-export OLLAMA_MODELS=/workspace/ollama
-export PATH=/workspace/ollama_bin:$PATH
-mkdir -p "$OLLAMA_MODELS" /workspace/ollama_bin
-
-MODEL_NAME="mistral-large"
-MODEL_VARIANT="123b"
-
-# Check available disk space (~60GB needed for mistral-large:123b)
-required_space=60000000  # ~60GB in KB
-available_space=$(df -k /workspace | tail -1 | awk '{print $4}')
-if [ "$available_space" -lt "$required_space" ]; then
-    echo "[ERROR] Insufficient disk space in /workspace. Need ~60GB, available: $((available_space/1024))MB."
-    exit 1
-fi
-
-# Check for Ollama in local persistent bin
-echo "[INFO] Checking for Ollama..."
-if ! command -v ollama &> /dev/null; then
-    echo "[INFO] Ollama not found in PATH. Installing locally to /workspace/ollama_bin..."
-    curl -fsSL https://ollama.com/install.sh | OLLAMA_DIR=/workspace/ollama_bin sh || {
-        echo "[ERROR] Failed to install Ollama."
-        exit 1
-    }
-    if ! command -v ollama &> /dev/null; then
-        echo "[ERROR] Ollama installation failed. Binary still not found."
-        exit 1
-    fi
+    echo "[WARN] No rclone config found. Skipping rclone copy..."
 else
-    echo "[INFO] Ollama is already available."
+    export RCLONE_CONFIG=/workspace/rclone_config/rclone.conf
 fi
 
-# Start Ollama server
-echo "[INFO] Starting Ollama server..."
-ollama serve &
+# 2. SYSTEM + PYTHON DEPS
+apt-get update && apt-get install -y git curl wget software-properties-common
+pip install --upgrade pip
+pip install torch transformers accelerate huggingface_hub vllm
 
-# Wait for Ollama server to be ready
-echo "[INFO] Waiting for Ollama server to be ready..."
-timeout=60
-elapsed=0
-until curl -s http://localhost:11434 >/dev/null; do
-    if [ $elapsed -ge $timeout ]; then
-        echo "[ERROR] Ollama server did not start within $timeout seconds."
-        exit 1
-    fi
-    sleep 2
-    elapsed=$((elapsed + 2))
-done
-echo "[INFO] Ollama server is ready."
+# 3. AUTHENTICATE HUGGINGFACE (Replace with your token or use env var)
+export HUGGINGFACE_TOKEN=hf_your_token_here
 
-# Check if Mistral Large 123B is already downloaded
-if ollama list | grep -q "$MODEL_NAME:$MODEL_VARIANT"; then
-    echo "[INFO] Mistral Large 123B already exists. Skipping download."
-else
-    echo "[INFO] Pulling Mistral Large 123B..."
-    ollama pull "$MODEL_NAME:$MODEL_VARIANT"
-fi
+# 4. DOWNLOAD MISTRAL-LARGE-2407
+echo "[INFO] Downloading Mistral-Large-Instruct-2407..."
+python3 - <<EOF
+from huggingface_hub import snapshot_download
+snapshot_download(
+  repo_id="mistralai/Mistral-Large-Instruct-2407",
+  local_dir="/workspace/models/mistral-large-2407",
+  token="${HUGGINGFACE_TOKEN}",
+  allow_patterns=[
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "generation_config.json",
+    "special_tokens_map.json",
+    "params.json",
+    "consolidated.*.safetensors"
+  ]
+)
+EOF
 
-# Ensure Python dependencies
-pip3 install requests
+# 5. START VLLM SERVER
+echo "[INFO] Launching vLLM OpenAI-compatible server on all GPUs..."
+python3 -m vllm.entrypoints.openai.api_server \
+  --model /workspace/models/mistral-large-2407 \
+  --tensor-parallel-size 5 \
+  --dtype bfloat16 \
+  --max-model-len 65536 \
+  --port 8000 &
 
-# Conditionally run rclone copy if config exists
+# 6. OPTIONAL RCLONE COPY
 if [ -f /workspace/rclone_config/rclone.conf ]; then
     echo "[INFO] Copying RheannaGiftFiles from Google Drive..."
     rclone copy gdrive:RheannaGiftFiles /workspace/ --config /workspace/rclone_config/rclone.conf
-else
-    echo "[WARN] Skipping rclone copy. Config file not found."
 fi
 
-echo "[INFO] Setup complete. Container is now idling."
+echo "[✅] Setup complete. vLLM API available at http://localhost:8000/v1"
 tail -f /dev/null
